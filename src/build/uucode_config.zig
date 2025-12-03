@@ -82,6 +82,9 @@ pub const tables = [_]config.Table{
         .fields = &.{
             d.field("is_emoji_presentation"),
             d.field("case_folding_full"),
+            d.field("general_category"),
+            d.field("east_asian_width"),
+            d.field("is_default_ignorable"),
         },
     },
     .{
@@ -95,6 +98,9 @@ pub const tables = [_]config.Table{
         .fields = &.{
             width.field("width"),
             wcwidth.field("wcwidth_zero_in_grapheme"),
+            // This and other fields in this table are now used during runtime
+            // on this branch, but they're kept here to reduce changes.
+            wcwidth.field("wcwidth_standalone"),
             grapheme_break_no_control.field("grapheme_break_no_control"),
             is_symbol.field("is_symbol"),
             d.field("is_emoji_vs_base"),

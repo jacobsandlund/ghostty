@@ -4,6 +4,7 @@ const Allocator = std.mem.Allocator;
 const font = @import("../main.zig");
 const shape = @import("../shape.zig");
 const terminal = @import("../../terminal/main.zig");
+const uucode = @import("uucode");
 const autoHash = std.hash.autoHash;
 const Hasher = std.hash.Wyhash;
 
@@ -37,6 +38,20 @@ pub const TextRun = struct {
     /// The font index to use for the glyphs of this run.
     font_index: font.Collection.Index,
 };
+
+pub const CodepointIterator = uucode.code_point.CustomIterator(struct {
+    cell: *const terminal.page.Cell,
+    grapheme: []const u21,
+
+    pub fn len(self: @This()) usize {
+        return self.grapheme.len + 1;
+    }
+
+    pub fn get(self: @This(), i: usize) u21 {
+        if (i == 0) return self.cell.codepoint();
+        return self.grapheme[i - 1];
+    }
+});
 
 /// RunIterator is an iterator that yields text runs.
 pub const RunIterator = struct {
@@ -106,6 +121,16 @@ pub const RunIterator = struct {
                 .spacer_head, .spacer_tail => continue,
             }
 
+            const ghostty_width = cell.gridWidth();
+            const grapheme_it = uucode.x.grapheme.IteratorNoControl(CodepointIterator).init(.init(.{
+                .cell = cell,
+                .grapheme = if (cell.hasGrapheme())
+                    graphemes[j]
+                else
+                    &[_]u21{},
+            }));
+            const uucode_width = uucode.x.grapheme.wcwidth(grapheme_it);
+
             // If our cell attributes are changing, then we split the run.
             // This prevents a single glyph for ">=" to be rendered with
             // one color when the two components have different styling.
@@ -159,20 +184,35 @@ pub const RunIterator = struct {
             };
 
             // Determine the presentation format for this glyph.
-            const presentation: ?font.Presentation = if (cell.hasGrapheme()) p: {
-                // We only check the FIRST codepoint because I believe the
-                // presentation format must be directly adjacent to the codepoint.
-                const cps = graphemes[j];
-                assert(cps.len > 0);
-                if (cps[0] == 0xFE0E) break :p .text;
-                if (cps[0] == 0xFE0F) break :p .emoji;
-                break :p null;
-            } else emoji: {
-                // If we're not a grapheme, our individual char could be
-                // an emoji so we want to check if we expect emoji presentation.
-                // The font grid indexForCodepoint we use below will do this
-                // automatically.
-                break :emoji null;
+            const presentation: font.Presentation = p: {
+                if (cell.hasGrapheme()) {
+                    const cps = graphemes[j];
+                    assert(cps.len > 0);
+
+                    // We check the FIRST codepoint past the base for
+                    // presentation variation selectors and emoji modifiers, as
+                    // they must be directly adjacent to the base codepoint.
+                    // Note that we strip out invalid VS15 and VS16 variation
+                    // selectors in Terminal `print`, otherwise we'd need to
+                    // check the sequence is valid here. Also, emoji modifiers
+                    // will be a separate grapheme if not following a emoji
+                    // modifier base.
+                    switch (cps[0]) {
+                        0xFE0E => break :p .text,
+                        0xFE0F => break :p .emoji,
+                        0x1F3FB => break :p .emoji,
+                        0x1F3FC => break :p .emoji,
+                        0x1F3FD => break :p .emoji,
+                        0x1F3FE => break :p .emoji,
+                        0x1F3FF => break :p .emoji,
+                        else => {},
+                    }
+                }
+
+                break :p if (uucode.get(.is_emoji_presentation, cell.codepoint()))
+                    .emoji
+                else
+                    .text;
             };
 
             // If our cursor is on this line then we break the run around the
@@ -257,13 +297,27 @@ pub const RunIterator = struct {
             // If we're a fallback character, add that and continue; we
             // don't want to add the entire grapheme.
             if (font_info.fallback) |cp| {
-                try self.addCodepoint(&hasher, cp, @intCast(cluster));
+                try self.addCodepoint(
+                    &hasher,
+                    cp,
+                    @intCast(cluster),
+                    presentation,
+                    uucode_width,
+                    ghostty_width,
+                );
                 continue;
             }
 
             // If we're a Kitty unicode placeholder then we add a blank.
             if (cell.codepoint() == terminal.kitty.graphics.unicode.placeholder) {
-                try self.addCodepoint(&hasher, ' ', @intCast(cluster));
+                try self.addCodepoint(
+                    &hasher,
+                    ' ',
+                    @intCast(cluster),
+                    presentation,
+                    uucode_width,
+                    ghostty_width,
+                );
                 continue;
             }
 
@@ -272,12 +326,22 @@ pub const RunIterator = struct {
                 &hasher,
                 if (cell.codepoint() == 0) ' ' else cell.codepoint(),
                 @intCast(cluster),
+                presentation,
+                uucode_width,
+                ghostty_width,
             );
             if (cell.hasGrapheme()) {
                 for (graphemes[j]) |cp| {
                     // Do not send presentation modifiers
                     if (cp == 0xFE0E or cp == 0xFE0F) continue;
-                    try self.addCodepoint(&hasher, cp, @intCast(cluster));
+                    try self.addCodepoint(
+                        &hasher,
+                        cp,
+                        @intCast(cluster),
+                        presentation,
+                        uucode_width,
+                        ghostty_width,
+                    );
                 }
             }
         }
@@ -303,10 +367,24 @@ pub const RunIterator = struct {
         };
     }
 
-    fn addCodepoint(self: *RunIterator, hasher: anytype, cp: u32, cluster: u32) !void {
+    fn addCodepoint(
+        self: *RunIterator,
+        hasher: anytype,
+        cp: u32,
+        cluster: u32,
+        presentation: font.Presentation,
+        uucode_width: usize,
+        ghostty_width: u2,
+    ) !void {
         autoHash(hasher, cp);
         autoHash(hasher, cluster);
-        try self.hooks.addCodepoint(cp, cluster);
+        try self.hooks.addCodepoint(
+            cp,
+            cluster,
+            presentation,
+            uucode_width,
+            ghostty_width,
+        );
     }
 
     /// Find a font index that supports the grapheme for the given cell,

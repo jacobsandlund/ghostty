@@ -19,6 +19,7 @@ const SharedGrid = font.SharedGrid;
 const Style = font.Style;
 const Presentation = font.Presentation;
 const CFReleaseThread = os.CFReleaseThread;
+const uucode = @import("uucode");
 
 const log = std.log.scoped(.font_shaper);
 
@@ -82,6 +83,11 @@ pub const Shaper = struct {
     const Codepoint = struct {
         codepoint: u32,
         cluster: u32,
+
+        // For debugging, only
+        presentation: font.Presentation,
+        uucode_width: usize,
+        ghostty_width: u2,
     };
 
     const RunState = struct {
@@ -101,6 +107,14 @@ pub const Shaper = struct {
             self.codepoints.clearRetainingCapacity();
             self.unichars.clearRetainingCapacity();
         }
+    };
+
+    const CellOffset = struct {
+        cluster: u32 = 0,
+        start_index: usize = 0,
+        end_index: usize = 0,
+        x: f64 = 0,
+        y: f64 = 0,
     };
 
     /// Create a CoreFoundation Dictionary suitable for
@@ -378,11 +392,7 @@ pub const Shaper = struct {
         self.cf_release_pool.appendAssumeCapacity(line);
 
         // This keeps track of the current offsets within a single cell.
-        var cell_offset: struct {
-            cluster: u32 = 0,
-            x: f64 = 0,
-            y: f64 = 0,
-        } = .{};
+        var cell_offset: CellOffset = .{};
 
         // Clear our cell buf and make sure we have enough room for the whole
         // line of glyphs, so that we can just assume capacity when appending
@@ -431,7 +441,15 @@ pub const Shaper = struct {
                     // wait for that.
                     if (cell_offset.cluster > cluster) break :pad;
 
-                    cell_offset = .{ .cluster = cluster };
+                    if (cluster != 0 and cell_offset.cluster != 0) {
+                        try maybePrintMismatch(alloc, state, run, cell_offset);
+                    }
+
+                    cell_offset = .{
+                        .start_index = index,
+                        .end_index = index,
+                        .cluster = cluster,
+                    };
                 }
 
                 self.cell_buf.appendAssumeCapacity(.{
@@ -445,8 +463,17 @@ pub const Shaper = struct {
                 // Advances apply to the NEXT cell.
                 cell_offset.x += advance.width;
                 cell_offset.y += advance.height;
+
+                if (index < cell_offset.start_index) {
+                    cell_offset.start_index = index;
+                }
+                if (index > cell_offset.end_index) {
+                    cell_offset.end_index = index;
+                }
             }
         }
+
+        try maybePrintMismatch(alloc, state, run, cell_offset);
 
         // If our buffer contains some non-ltr sections we need to sort it :/
         if (non_ltr) {
@@ -468,6 +495,64 @@ pub const Shaper = struct {
         }
 
         return self.cell_buf.items;
+    }
+
+    fn maybePrintMismatch(
+        alloc: Allocator,
+        state: *RunState,
+        run: font.shape.TextRun,
+        cell_offset: CellOffset,
+    ) !void {
+        const codepoints = state.codepoints.items[cell_offset.start_index .. cell_offset.end_index + 1];
+        const cp: u21 = @intCast(codepoints[0].codepoint);
+
+        // Skip fallback characters. The original character may have been wide
+        // or narrow, and Ghostty prints a single fallback character regardless
+        // of the original character's width.
+        if (cp == 0xFFFD) return;
+
+        const cell_width: f64 = @floatFromInt(run.grid.metrics.cell_width);
+        const actual_width: usize = @intFromFloat(@ceil(cell_offset.x / cell_width));
+        const presentation = codepoints[0].presentation;
+        const uucode_width = codepoints[0].uucode_width;
+        const ghostty_width = codepoints[0].ghostty_width;
+        const next_cp: isize = if (cell_offset.end_index + 1 < state.codepoints.items.len)
+            state.codepoints.items[cell_offset.end_index + 1].codepoint
+        else
+            -1;
+        if (uucode_width != actual_width or ghostty_width != actual_width) {
+            const cps = try formatCps(alloc, codepoints);
+            std.log.warn("[coretext] cell_offset cluster: {d}, x: {d}, y: {d}, cell_width: {d}, uucode width: {d}, ghostty width: {d}, actual width: {d}, uucode mismatch: {}, ghostty mismatch: {}, presentation: {s}, gc: {s}, eaw: {s}, di: {}, [next cp: {x}] cps: {s}", .{
+                cell_offset.cluster,
+                cell_offset.x,
+                cell_offset.y,
+                cell_width,
+                uucode_width,
+                ghostty_width,
+                actual_width,
+                uucode_width != actual_width,
+                ghostty_width != actual_width,
+                @tagName(presentation),
+                @tagName(uucode.get(.general_category, cp)),
+                @tagName(uucode.get(.east_asian_width, cp)),
+                uucode.get(.is_default_ignorable, cp),
+                next_cp,
+                cps,
+            });
+        }
+    }
+
+    fn formatCps(alloc: Allocator, codepoints: []const Codepoint) ![]const u8 {
+        var allocating = std.Io.Writer.Allocating.init(alloc);
+        const writer = &allocating.writer;
+        for (codepoints) |cp| {
+            try writer.print("\\u{{{x}}}", .{cp.codepoint});
+        }
+        try writer.writeAll(" → ");
+        for (codepoints) |cp| {
+            try writer.print("{u}", .{@as(u21, @intCast(cp.codepoint))});
+        }
+        return allocating.toOwnedSlice();
     }
 
     /// Get an attr dict for a font from a specific index.
@@ -577,7 +662,14 @@ pub const Shaper = struct {
             // log.warn("----------- run reset -------------", .{});
         }
 
-        pub fn addCodepoint(self: RunIteratorHook, cp: u32, cluster: u32) !void {
+        pub fn addCodepoint(
+            self: RunIteratorHook,
+            cp: u32,
+            cluster: u32,
+            presentation: font.Presentation,
+            uucode_width: usize,
+            ghostty_width: u2,
+        ) !void {
             const state = &self.shaper.run_state;
 
             // Build our UTF-16 string for CoreText
@@ -597,6 +689,9 @@ pub const Shaper = struct {
             try state.codepoints.append(self.shaper.alloc, .{
                 .codepoint = cp,
                 .cluster = cluster,
+                .presentation = presentation,
+                .uucode_width = uucode_width,
+                .ghostty_width = ghostty_width,
             });
             // log.warn("run cp={X}", .{cp});
 
@@ -606,6 +701,9 @@ pub const Shaper = struct {
             if (pair) try state.codepoints.append(self.shaper.alloc, .{
                 .codepoint = 0,
                 .cluster = cluster,
+                .presentation = presentation,
+                .uucode_width = uucode_width,
+                .ghostty_width = ghostty_width,
             });
         }
 

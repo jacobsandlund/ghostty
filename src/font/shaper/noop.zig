@@ -125,7 +125,17 @@ pub const Shaper = struct {
             try self.shaper.run_state.reset();
         }
 
-        pub fn addCodepoint(self: RunIteratorHook, cp: u32, cluster: u32) !void {
+        pub fn addCodepoint(
+            self: RunIteratorHook,
+            cp: u32,
+            cluster: u32,
+            presentation: font.Presentation,
+            uucode_width: usize,
+            ghostty_width: u2,
+        ) !void {
+            _ = presentation;
+            _ = uucode_width;
+            _ = ghostty_width;
             try self.shaper.run_state.codepoints.append(self.shaper.alloc, .{
                 .codepoint = cp,
                 .cluster = cluster,

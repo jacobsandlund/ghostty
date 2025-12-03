@@ -186,7 +186,17 @@ pub const Shaper = struct {
             self.shaper.hb_buf.setDirection(.ltr);
         }
 
-        pub fn addCodepoint(self: RunIteratorHook, cp: u32, cluster: u32) !void {
+        pub fn addCodepoint(
+            self: RunIteratorHook,
+            cp: u32,
+            cluster: u32,
+            presentation: font.Presentation,
+            uucode_width: usize,
+            ghostty_width: u2,
+        ) !void {
+            _ = presentation;
+            _ = uucode_width;
+            _ = ghostty_width;
             // log.warn("cluster={} cp={x}", .{ cluster, cp });
             self.shaper.hb_buf.add(cp, cluster);
         }
