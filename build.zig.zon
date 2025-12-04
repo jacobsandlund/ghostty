@@ -39,8 +39,8 @@
         },
         .uucode = .{
             // jacobsandlund/uucode
-            .url = "https://github.com/jacobsandlund/uucode/archive/7817e8de72653232ab6830b1edad0363a8f8df99.tar.gz",
-            .hash = "uucode-0.1.0-ZZjBPuQ5TQB9X5TNU_kWFN3ljFwimacrcg0XxP_t0KMU",
+            .url = "https://github.com/jacobsandlund/uucode/archive/c4b17553f7fbac59cc4c0cf2b8a397fb337fe8ae.tar.gz",
+            .hash = "uucode-0.1.0-ZZjBPpQ5TQCVN0N0enjtS7a7CNgoCERciSLe6-DmOSqQ",
         },
         .zig_wayland = .{
             // codeberg ifreund/zig-wayland

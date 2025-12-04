@@ -115,6 +115,9 @@ pub const Shaper = struct {
         end_index: usize = 0,
         x: f64 = 0,
         y: f64 = 0,
+        x_start: f64 = 0,
+        y_start: f64 = 0,
+        visual_right: f64 = 0,
     };
 
     /// Create a CoreFoundation Dictionary suitable for
@@ -421,17 +424,29 @@ pub const Shaper = struct {
             // Get our glyphs and positions
             const glyphs = ctrun.getGlyphsPtr() orelse try ctrun.getGlyphs(alloc);
             const advances = ctrun.getAdvancesPtr() orelse try ctrun.getAdvances(alloc);
+            const positions = ctrun.getPositionsPtr() orelse try ctrun.getPositions(alloc);
             const indices = ctrun.getStringIndicesPtr() orelse try ctrun.getStringIndices(alloc);
             assert(glyphs.len == advances.len);
+            assert(glyphs.len == positions.len);
             assert(glyphs.len == indices.len);
+
+            // Get bounding rects for all glyphs in this run to calculate visual width
+            const run_font = ctrun.getFont();
+            const glyph_rects: ?[]macos.graphics.Rect = if (run_font) |f| blk: {
+                const rects = try alloc.alloc(macos.graphics.Rect, glyphs.len);
+                _ = f.getBoundingRectsForGlyphs(.horizontal, glyphs, rects);
+                break :blk rects;
+            } else null;
 
             for (
                 glyphs,
                 advances,
+                positions,
                 indices,
-            ) |glyph, advance, index| {
+                0..,
+            ) |glyph, advance, position, index, glyph_i| {
                 // Our cluster is also our cell X position. If the cluster changes
-                // then we need to reset our current cell offsets.
+                // then we need to record our starting position for offset calculations.
                 const cluster = state.codepoints.items[index].cluster;
                 if (cell_offset.cluster != cluster) pad: {
                     // We previously asserted this but for rtl text this is
@@ -445,17 +460,56 @@ pub const Shaper = struct {
                         try maybePrintMismatch(alloc, state, run, cell_offset);
                     }
 
-                    cell_offset = .{
-                        .start_index = index,
-                        .end_index = index,
-                        .cluster = cluster,
-                    };
+                    cell_offset.start_index = index;
+                    cell_offset.end_index = index;
+                    cell_offset.cluster = cluster;
+                    cell_offset.x_start = cell_offset.x;
+                    cell_offset.y_start = cell_offset.y;
+                    cell_offset.visual_right = 0;
+                } else {
+                    if (index < cell_offset.start_index) {
+                        cell_offset.start_index = index;
+                    }
+                    if (index > cell_offset.end_index) {
+                        cell_offset.end_index = index;
+                    }
+                }
+
+                // Track the rightmost painted pixel of this glyph relative to cluster start.
+                // glyph_rect is relative to glyph origin, so add position offset to get cluster-relative x.
+                if (glyph_rects) |rects| {
+                    const glyph_rect = rects[glyph_i];
+                    const glyph_visual_right = (position.x - cell_offset.x_start) + glyph_rect.origin.x + glyph_rect.size.width;
+                    cell_offset.visual_right = @max(cell_offset.visual_right, glyph_visual_right);
+                }
+
+                const x_offset = position.x - cell_offset.x_start;
+                const y_offset = position.y - cell_offset.y_start;
+
+                const advance_x_offset = cell_offset.x - cell_offset.x_start;
+                const advance_y_offset = cell_offset.y - cell_offset.y_start;
+                const x_offset_diff = x_offset - advance_x_offset;
+                const y_offset_diff = y_offset - advance_y_offset;
+                if (@abs(x_offset_diff) > 0.0001 or @abs(y_offset_diff) > 0.0001) {
+                    const cluster_cps = try formatCps(alloc, state.codepoints.items[cell_offset.start_index .. cell_offset.end_index + 1]);
+                    const current_cp = try formatCps(alloc, state.codepoints.items[index .. index + 1]);
+                    std.log.warn("[coretext] position differs from advance: cluster={d} pos=({d:.2},{d:.2}) adv=({d:.2},{d:.2}) diff=({d:.2},{d:.2}) current: {s} cluster: {s}", .{
+                        cluster,
+                        x_offset,
+                        y_offset,
+                        advance_x_offset,
+                        advance_y_offset,
+                        x_offset_diff,
+                        y_offset_diff,
+                        current_cp,
+                        cluster_cps,
+                    });
                 }
 
                 self.cell_buf.appendAssumeCapacity(.{
                     .x = @intCast(cluster),
-                    .x_offset = @intFromFloat(@round(cell_offset.x)),
-                    .y_offset = @intFromFloat(@round(cell_offset.y)),
+                    .x_offset = @intFromFloat(@round(x_offset)),
+                    .y_offset = @intFromFloat(@round(y_offset)),
                     .glyph_index = glyph,
                 });
 
@@ -463,13 +517,6 @@ pub const Shaper = struct {
                 // Advances apply to the NEXT cell.
                 cell_offset.x += advance.width;
                 cell_offset.y += advance.height;
-
-                if (index < cell_offset.start_index) {
-                    cell_offset.start_index = index;
-                }
-                if (index > cell_offset.end_index) {
-                    cell_offset.end_index = index;
-                }
             }
         }
 
@@ -512,7 +559,18 @@ pub const Shaper = struct {
         if (cp == 0xFFFD) return;
 
         const cell_width: f64 = @floatFromInt(run.grid.metrics.cell_width);
-        const actual_width: usize = @intFromFloat(@ceil(cell_offset.x / cell_width));
+        const advance_width = cell_offset.x - cell_offset.x_start;
+        const visual_width = cell_offset.visual_right;
+        // Use visual width for actual_width, but fall back to advance for glyphs with no painted pixels (e.g. space)
+        const width_for_cells = if (visual_width > 0) visual_width else advance_width;
+        // Calculate a range of possible cell widths with 1px tolerance for
+        // glyphs falling right at the edge of the next cell (1px before to 1px
+        // after)
+        const tolerance = 2.0;
+        const min_width = @max(0, width_for_cells - tolerance);
+        const max_width = width_for_cells + tolerance;
+        const min_cells: usize = @intFromFloat(@ceil(min_width / cell_width));
+        const max_cells: usize = @intFromFloat(@ceil(max_width / cell_width));
         const presentation = codepoints[0].presentation;
         const uucode_width = codepoints[0].uucode_width;
         const ghostty_width = codepoints[0].ghostty_width;
@@ -520,21 +578,25 @@ pub const Shaper = struct {
             state.codepoints.items[cell_offset.end_index + 1].codepoint
         else
             -1;
-        if (uucode_width != actual_width or ghostty_width != actual_width) {
+        // Check if uucode/ghostty widths fall within the tolerance range
+        const uucode_in_range = uucode_width >= min_cells and uucode_width <= max_cells;
+        const ghostty_in_range = ghostty_width >= min_cells and ghostty_width <= max_cells;
+        if (!uucode_in_range or !ghostty_in_range) {
             const cps = try formatCps(alloc, codepoints);
-            std.log.warn("[coretext] cell_offset cluster: {d}, x: {d}, y: {d}, cell_width: {d}, uucode width: {d}, ghostty width: {d}, actual width: {d}, uucode mismatch: {}, ghostty mismatch: {}, presentation: {s}, gc: {s}, eaw: {s}, di: {}, [next cp: {x}] cps: {s}", .{
+            std.log.warn("[coretext] cell_offset cluster: {d}, advance: {d}, visual: {d}, cell_width: {d}, uucode width: {d}, ghostty width: {d}, actual width: [{d}, {d}], uucode mismatch: {}, ghostty mismatch: {}, presentation: {t}, gc: {t}, eaw: {t}, di: {}, [next cp: {x}] cps: {s}", .{
                 cell_offset.cluster,
-                cell_offset.x,
-                cell_offset.y,
+                advance_width,
+                visual_width,
                 cell_width,
                 uucode_width,
                 ghostty_width,
-                actual_width,
-                uucode_width != actual_width,
-                ghostty_width != actual_width,
-                @tagName(presentation),
-                @tagName(uucode.get(.general_category, cp)),
-                @tagName(uucode.get(.east_asian_width, cp)),
+                min_cells,
+                max_cells,
+                !uucode_in_range,
+                !ghostty_in_range,
+                presentation,
+                uucode.get(.general_category, cp),
+                uucode.get(.east_asian_width, cp),
                 uucode.get(.is_default_ignorable, cp),
                 next_cp,
                 cps,
@@ -546,7 +608,11 @@ pub const Shaper = struct {
         var allocating = std.Io.Writer.Allocating.init(alloc);
         const writer = &allocating.writer;
         for (codepoints) |cp| {
-            try writer.print("\\u{{{x}}}", .{cp.codepoint});
+            if (cp.codepoint <= 0xFFFF) {
+                try writer.print("\\u{x:0>4}", .{cp.codepoint});
+            } else {
+                try writer.print("\\U{x:0>8}", .{cp.codepoint});
+            }
         }
         try writer.writeAll(" → ");
         for (codepoints) |cp| {
