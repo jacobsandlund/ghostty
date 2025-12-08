@@ -88,6 +88,7 @@ pub const Shaper = struct {
         presentation: font.Presentation,
         uucode_width: usize,
         ghostty_width: u2,
+        grapheme_it: terminal.GraphemeIterator,
     };
 
     const RunState = struct {
@@ -456,7 +457,7 @@ pub const Shaper = struct {
                     // wait for that.
                     if (cell_offset.cluster > cluster) break :pad;
 
-                    if (cluster != 0 and cell_offset.cluster != 0) {
+                    if (cluster != 0) {
                         try maybePrintMismatch(alloc, state, run, cell_offset);
                     }
 
@@ -563,17 +564,18 @@ pub const Shaper = struct {
         const visual_width = cell_offset.visual_right;
         // Use visual width for actual_width, but fall back to advance for glyphs with no painted pixels (e.g. space)
         const width_for_cells = if (visual_width > 0) visual_width else advance_width;
-        // Calculate a range of possible cell widths with 1px tolerance for
-        // glyphs falling right at the edge of the next cell (1px before to 1px
+        // Calculate a range of possible cell widths with 4px tolerance for
+        // glyphs falling right at the edge of the next cell (0px before to 4px
         // after)
-        const tolerance = 2.0;
-        const min_width = @max(0, width_for_cells - tolerance);
+        const tolerance = 4.0;
+        const min_width = width_for_cells;
         const max_width = width_for_cells + tolerance;
         const min_cells: usize = @intFromFloat(@ceil(min_width / cell_width));
         const max_cells: usize = @intFromFloat(@ceil(max_width / cell_width));
         const presentation = codepoints[0].presentation;
         const uucode_width = codepoints[0].uucode_width;
         const ghostty_width = codepoints[0].ghostty_width;
+        const grapheme_it = codepoints[0].grapheme_it;
         const next_cp: isize = if (cell_offset.end_index + 1 < state.codepoints.items.len)
             state.codepoints.items[cell_offset.end_index + 1].codepoint
         else
@@ -583,7 +585,8 @@ pub const Shaper = struct {
         const ghostty_in_range = ghostty_width >= min_cells and ghostty_width <= max_cells;
         if (!uucode_in_range or !ghostty_in_range) {
             const cps = try formatCps(alloc, codepoints);
-            std.log.warn("[coretext] cell_offset cluster: {d}, advance: {d}, visual: {d}, cell_width: {d}, uucode width: {d}, ghostty width: {d}, actual width: [{d}, {d}], uucode mismatch: {}, ghostty mismatch: {}, presentation: {t}, gc: {t}, eaw: {t}, di: {}, [next cp: {x}] cps: {s}", .{
+            const original_cps = try formatOriginalCps(alloc, grapheme_it);
+            std.log.warn("[coretext] cell_offset cluster: {d}, advance: {d:.2}, visual: {d:.2}, cell_width: {d}, uucode width: {d}, ghostty width: {d}, actual width: [{d}, {d}], uucode mismatch: {}, ghostty mismatch: {}, presentation: {t}, gc: {t}, eaw: {t}, di: {}, [next cp: {x}] cps: {s}  | original_cps: {s}", .{
                 cell_offset.cluster,
                 advance_width,
                 visual_width,
@@ -600,6 +603,7 @@ pub const Shaper = struct {
                 uucode.get(.is_default_ignorable, cp),
                 next_cp,
                 cps,
+                original_cps,
             });
         }
     }
@@ -608,6 +612,9 @@ pub const Shaper = struct {
         var allocating = std.Io.Writer.Allocating.init(alloc);
         const writer = &allocating.writer;
         for (codepoints) |cp| {
+            // Skip codepoints added for surrogate pairs
+            if (cp.codepoint == 0) continue;
+
             if (cp.codepoint <= 0xFFFF) {
                 try writer.print("\\u{x:0>4}", .{cp.codepoint});
             } else {
@@ -616,7 +623,30 @@ pub const Shaper = struct {
         }
         try writer.writeAll(" → ");
         for (codepoints) |cp| {
+            // Skip codepoints added for surrogate pairs
+            if (cp.codepoint == 0) continue;
+
             try writer.print("{u}", .{@as(u21, @intCast(cp.codepoint))});
+        }
+        return allocating.toOwnedSlice();
+    }
+
+    fn formatOriginalCps(alloc: Allocator, grapheme_it: terminal.GraphemeIterator) ![]const u8 {
+        var first_it = grapheme_it;
+        var allocating = std.Io.Writer.Allocating.init(alloc);
+        const writer = &allocating.writer;
+        while (first_it.nextCodePoint()) |result| {
+            const cp = result.code_point;
+            if (cp <= 0xFFFF) {
+                try writer.print("\\u{x:0>4}", .{cp});
+            } else {
+                try writer.print("\\U{x:0>8}", .{cp});
+            }
+        }
+        try writer.writeAll(" → ");
+        var second_it = grapheme_it;
+        while (second_it.nextCodePoint()) |result| {
+            try writer.print("{u}", .{@as(u21, @intCast(result.code_point))});
         }
         return allocating.toOwnedSlice();
     }
@@ -735,6 +765,7 @@ pub const Shaper = struct {
             presentation: font.Presentation,
             uucode_width: usize,
             ghostty_width: u2,
+            grapheme_it: terminal.GraphemeIterator,
         ) !void {
             const state = &self.shaper.run_state;
 
@@ -758,6 +789,7 @@ pub const Shaper = struct {
                 .presentation = presentation,
                 .uucode_width = uucode_width,
                 .ghostty_width = ghostty_width,
+                .grapheme_it = grapheme_it,
             });
             // log.warn("run cp={X}", .{cp});
 
@@ -770,6 +802,7 @@ pub const Shaper = struct {
                 .presentation = presentation,
                 .uucode_width = uucode_width,
                 .ghostty_width = ghostty_width,
+                .grapheme_it = grapheme_it,
             });
         }
 

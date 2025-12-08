@@ -39,20 +39,6 @@ pub const TextRun = struct {
     font_index: font.Collection.Index,
 };
 
-pub const CodepointIterator = uucode.code_point.CustomIterator(struct {
-    cell: *const terminal.page.Cell,
-    grapheme: []const u21,
-
-    pub fn len(self: @This()) usize {
-        return self.grapheme.len + 1;
-    }
-
-    pub fn get(self: @This(), i: usize) u21 {
-        if (i == 0) return self.cell.codepoint();
-        return self.grapheme[i - 1];
-    }
-});
-
 /// RunIterator is an iterator that yields text runs.
 pub const RunIterator = struct {
     hooks: font.Shaper.RunIteratorHook,
@@ -122,7 +108,7 @@ pub const RunIterator = struct {
             }
 
             const ghostty_width = cell.gridWidth();
-            const grapheme_it = uucode.x.grapheme.IteratorNoControl(CodepointIterator).init(.init(.{
+            const grapheme_it = terminal.GraphemeIterator.init(.init(.{
                 .cell = cell,
                 .grapheme = if (cell.hasGrapheme())
                     graphemes[j]
@@ -304,6 +290,7 @@ pub const RunIterator = struct {
                     presentation,
                     uucode_width,
                     ghostty_width,
+                    grapheme_it,
                 );
                 continue;
             }
@@ -317,6 +304,7 @@ pub const RunIterator = struct {
                     presentation,
                     uucode_width,
                     ghostty_width,
+                    grapheme_it,
                 );
                 continue;
             }
@@ -329,6 +317,7 @@ pub const RunIterator = struct {
                 presentation,
                 uucode_width,
                 ghostty_width,
+                grapheme_it,
             );
             if (cell.hasGrapheme()) {
                 for (graphemes[j]) |cp| {
@@ -341,6 +330,7 @@ pub const RunIterator = struct {
                         presentation,
                         uucode_width,
                         ghostty_width,
+                        grapheme_it,
                     );
                 }
             }
@@ -375,6 +365,7 @@ pub const RunIterator = struct {
         presentation: font.Presentation,
         uucode_width: usize,
         ghostty_width: u2,
+        grapheme_it: terminal.GraphemeIterator,
     ) !void {
         autoHash(hasher, cp);
         autoHash(hasher, cluster);
@@ -384,6 +375,7 @@ pub const RunIterator = struct {
             presentation,
             uucode_width,
             ghostty_width,
+            grapheme_it,
         );
     }
 

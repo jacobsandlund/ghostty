@@ -1,4 +1,5 @@
 const std = @import("std");
+const uucode = @import("uucode");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -868,6 +869,22 @@ pub const RenderState = struct {
         return result;
     }
 };
+
+pub const CodepointIterator = uucode.code_point.CustomIterator(struct {
+    cell: *const page.Cell,
+    grapheme: []const u21,
+
+    pub fn len(self: @This()) usize {
+        return self.grapheme.len + 1;
+    }
+
+    pub fn get(self: @This(), i: usize) u21 {
+        if (i == 0) return self.cell.codepoint();
+        return self.grapheme[i - 1];
+    }
+});
+
+pub const GraphemeIterator = uucode.x.grapheme.IteratorNoControl(CodepointIterator);
 
 test "styled" {
     const testing = std.testing;

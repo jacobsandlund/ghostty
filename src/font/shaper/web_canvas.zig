@@ -218,10 +218,12 @@ pub const Shaper = struct {
             presentation: font.Presentation,
             uucode_width: usize,
             ghostty_width: u2,
+            grapheme_it: terminal.GraphemeIterator,
         ) !void {
             _ = presentation;
             _ = uucode_width;
             _ = ghostty_width;
+            _ = grapheme_it;
             try self.shaper.run_buf.append(self.shaper.alloc, .{
                 .codepoint = cp,
                 .cluster = cluster,

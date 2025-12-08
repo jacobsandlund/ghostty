@@ -193,10 +193,12 @@ pub const Shaper = struct {
             presentation: font.Presentation,
             uucode_width: usize,
             ghostty_width: u2,
+            grapheme_it: terminal.GraphemeIterator,
         ) !void {
             _ = presentation;
             _ = uucode_width;
             _ = ghostty_width;
+            _ = grapheme_it;
             // log.warn("cluster={} cp={x}", .{ cluster, cp });
             self.shaper.hb_buf.add(cp, cluster);
         }
