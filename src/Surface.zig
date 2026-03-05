@@ -46,8 +46,8 @@ const Renderer = rendererpkg.Renderer;
 /// being resized to a size that is too small to be useful. These defaults
 /// are chosen to match the default size of Mac's Terminal.app, but is
 /// otherwise somewhat arbitrary.
-const min_window_width_cells: u32 = 10;
-const min_window_height_cells: u32 = 4;
+pub const min_window_width_cells: u32 = 10;
+pub const min_window_height_cells: u32 = 4;
 
 /// The maximum number of key tables that can be active at any
 /// given time. `activate_key_table` calls after this are ignored.
@@ -312,6 +312,7 @@ const DerivedConfig = struct {
     mouse_reporting: bool,
     mouse_scroll_multiplier: configpkg.MouseScrollMultiplier,
     mouse_shift_capture: configpkg.MouseShiftCapture,
+    fullscreen: configpkg.Fullscreen,
     macos_non_native_fullscreen: configpkg.NonNativeFullscreen,
     macos_option_as_alt: ?input.OptionAsAlt,
     selection_clear_on_copy: bool,
@@ -389,6 +390,7 @@ const DerivedConfig = struct {
             .mouse_reporting = config.@"mouse-reporting",
             .mouse_scroll_multiplier = config.@"mouse-scroll-multiplier",
             .mouse_shift_capture = config.@"mouse-shift-capture",
+            .fullscreen = config.fullscreen,
             .macos_non_native_fullscreen = config.@"macos-non-native-fullscreen",
             .macos_option_as_alt = config.@"macos-option-as-alt",
             .selection_clear_on_copy = config.@"selection-clear-on-copy",
@@ -605,10 +607,14 @@ pub fn init(
     };
 
     // The command we're going to execute
-    const command: ?configpkg.Command = if (app.first)
-        config.@"initial-command" orelse config.command
-    else
-        config.command;
+    const command: ?configpkg.Command = command: {
+        if (app.first) {
+            if (config.@"initial-command") |command| {
+                break :command command;
+            }
+        }
+        break :command config.command;
+    };
 
     // Start our IO implementation
     // This separate block ({}) is important because our errdefers must
@@ -632,19 +638,12 @@ pub fn init(
             .env_override = config.env,
             .shell_integration = config.@"shell-integration",
             .shell_integration_features = config.@"shell-integration-features",
+            .cursor_blink = config.@"cursor-style-blink",
             .working_directory = config.@"working-directory",
             .resources_dir = global_state.resources_dir.host(),
             .term = config.term,
-
-            // Get the cgroup if we're on linux and have the decl. I'd love
-            // to change this from a decl to a surface options struct because
-            // then we can do memory management better (don't need to retain
-            // the string around).
-            .linux_cgroup = if (comptime builtin.os.tag == .linux and
-                @hasDecl(apprt.runtime.Surface, "cgroup"))
-                rt_surface.cgroup()
-            else
-                Command.linux_cgroup_default,
+            .rt_pre_exec_info = .init(config),
+            .rt_post_fork_info = .init(config),
         });
         errdefer io_exec.deinit();
 
@@ -803,7 +802,7 @@ pub fn deinit(self: *Surface) void {
     self.io.deinit();
 
     if (self.inspector) |v| {
-        v.deinit();
+        v.deinit(self.alloc);
         self.alloc.destroy(v);
     }
 
@@ -879,8 +878,10 @@ pub fn activateInspector(self: *Surface) !void {
     // Setup the inspector
     const ptr = try self.alloc.create(inspectorpkg.Inspector);
     errdefer self.alloc.destroy(ptr);
-    ptr.* = try inspectorpkg.Inspector.init(self);
+    ptr.* = try inspectorpkg.Inspector.init(self.alloc);
+    errdefer ptr.deinit(self.alloc);
     self.inspector = ptr;
+    errdefer self.inspector = null;
 
     // Put the inspector onto the render state
     {
@@ -912,7 +913,7 @@ pub fn deactivateInspector(self: *Surface) void {
     self.queueIo(.{ .inspector = false }, .unlocked);
 
     // Deinit the inspector
-    insp.deinit();
+    insp.deinit(self.alloc);
     self.alloc.destroy(insp);
     self.inspector = null;
 }
@@ -1179,7 +1180,7 @@ fn selectionScrollTick(self: *Surface) !void {
     }
 
     // Scroll the viewport as required
-    try t.scrollViewport(.{ .delta = delta });
+    t.scrollViewport(.{ .delta = delta });
 
     // Next, trigger our drag behavior
     const pin = t.screens.active.pages.pin(.{
@@ -2618,7 +2619,7 @@ pub fn keyCallback(
     defer crash.sentry.thread_state = null;
 
     // Setup our inspector event if we have an inspector.
-    var insp_ev: ?inspectorpkg.key.Event = if (self.inspector != null) ev: {
+    var insp_ev: ?inspectorpkg.KeyEvent = if (self.inspector != null) ev: {
         var copy = event;
         copy.utf8 = "";
         if (event.utf8.len > 0) copy.utf8 = try self.alloc.dupe(u8, event.utf8);
@@ -2635,7 +2636,7 @@ pub fn keyCallback(
             break :ev;
         };
 
-        if (insp.recordKeyEvent(ev)) {
+        if (insp.recordKeyEvent(self.alloc, ev)) {
             self.queueRender() catch {};
         } else |err| {
             log.warn("error adding key event to inspector err={}", .{err});
@@ -2784,7 +2785,7 @@ pub fn keyCallback(
             try self.setSelection(null);
         }
 
-        if (self.config.scroll_to_bottom.keystroke) try self.io.terminal.scrollViewport(.bottom);
+        if (self.config.scroll_to_bottom.keystroke) self.io.terminal.scrollViewport(.bottom);
 
         try self.queueRender();
     }
@@ -2798,7 +2799,7 @@ pub fn keyCallback(
 fn maybeHandleBinding(
     self: *Surface,
     event: input.KeyEvent,
-    insp_ev: ?*inspectorpkg.key.Event,
+    insp_ev: ?*inspectorpkg.KeyEvent,
 ) !?InputEffect {
     switch (event.action) {
         // Release events never trigger a binding but we need to check if
@@ -2976,6 +2977,9 @@ fn maybeHandleBinding(
         // If our action was "ignore" then we return the special input
         // effect of "ignored".
         for (actions) |action| if (action == .ignore) {
+            // If we're in a sequence, clear it.
+            self.endKeySequence(.drop, .retain);
+
             return .ignored;
         };
     }
@@ -3131,7 +3135,7 @@ fn endKeySequence(
 fn encodeKey(
     self: *Surface,
     event: input.KeyEvent,
-    insp_ev: ?*inspectorpkg.key.Event,
+    insp_ev: ?*inspectorpkg.KeyEvent,
 ) !?termio.Message.WriteReq {
     const write_req: termio.Message.WriteReq = req: {
         // Build our encoding options, which requires the lock.
@@ -3537,7 +3541,7 @@ pub fn scrollCallback(
             // Modify our viewport, this requires a lock since it affects
             // rendering. We have to switch signs here because our delta
             // is negative down but our viewport is positive down.
-            try self.io.terminal.scrollViewport(.{ .delta = y.delta * -1 });
+            self.io.terminal.scrollViewport(.{ .delta = y.delta * -1 });
         }
     }
 
@@ -3872,36 +3876,8 @@ pub fn mouseButtonCallback(
     // log.debug("mouse action={} button={} mods={}", .{ action, button, mods });
 
     // If we have an inspector, we always queue a render
-    if (self.inspector) |insp| {
+    if (self.inspector != null) {
         defer self.queueRender() catch {};
-
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
-
-        // If the inspector is requesting a cell, then we intercept
-        // left mouse clicks and send them to the inspector.
-        if (insp.cell == .requested and
-            button == .left and
-            action == .press)
-        {
-            const pos = try self.rt_surface.getCursorPos();
-            const point = self.posToViewport(pos.x, pos.y);
-            const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
-            const p = screen.pages.pin(.{ .viewport = point }) orelse {
-                log.warn("failed to get pin for clicked point", .{});
-                return false;
-            };
-
-            insp.cell.select(
-                self.alloc,
-                p,
-                point.x,
-                point.y,
-            ) catch |err| {
-                log.warn("error selecting cell for inspector err={}", .{err});
-            };
-            return false;
-        }
     }
 
     // Always record our latest mouse state
@@ -3995,6 +3971,15 @@ pub fn mouseButtonCallback(
                 log.warn("error processing links err={}", .{err});
             }
         }
+
+        // Handle prompt clicking. If we released our mouse on a prompt
+        // and we support some kind of click events, then we need to
+        // move to it.
+        if (self.maybePromptClick()) |handled| {
+            if (handled) return true;
+        } else |err| {
+            log.warn("error processing prompt click err={}", .{err});
+        }
     }
 
     // Report mouse events if enabled
@@ -4034,25 +4019,6 @@ pub fn mouseButtonCallback(
             // selection or highlighting.
             return true;
         }
-    }
-
-    // For left button click release we check if we are moving our cursor.
-    if (button == .left and
-        action == .release and
-        mods.alt)
-    click_move: {
-        self.renderer_state.mutex.lock();
-        defer self.renderer_state.mutex.unlock();
-
-        // If we have a selection then we do not do click to move because
-        // it means that we moved our cursor while pressing the mouse button.
-        if (self.io.terminal.screens.active.selection != null) break :click_move;
-
-        // Moving always resets the click count so that we don't highlight.
-        self.mouse.left_click_count = 0;
-        const pin = self.mouse.left_click_pin orelse break :click_move;
-        try self.clickMoveCursor(pin.*);
-        return true;
     }
 
     // For left button clicks we always record some information for
@@ -4214,10 +4180,6 @@ pub fn mouseButtonCallback(
                     .y = pt_viewport.y,
                 },
             }) orelse {
-                // Weird... our viewport x/y that we just converted isn't
-                // found in our pages. This is probably a bug but we don't
-                // want to crash in releases because its harmless. So, we
-                // only assert in debug mode.
                 if (comptime std.debug.runtime_safety) unreachable;
                 break :sel;
             };
@@ -4304,58 +4266,121 @@ pub fn mouseButtonCallback(
     return false;
 }
 
-/// Performs the "click-to-move" logic to move the cursor to the given
-/// screen point if possible. This works by converting the path to the
-/// given point into a series of arrow key inputs.
-fn clickMoveCursor(self: *Surface, to: terminal.Pin) !void {
-    // If click-to-move is disabled then we're done.
-    if (!self.config.cursor_click_to_move) return;
+fn maybePromptClick(self: *Surface) !bool {
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+    const t: *terminal.Terminal = self.renderer_state.terminal;
+    const screen: *terminal.Screen = t.screens.active;
 
-    const t = &self.io.terminal;
+    // If our screen doesn't handle any prompt clicks, then we never
+    // do anything.
+    if (screen.semantic_prompt.click == .none) return false;
 
-    // Click to move cursor only works on the primary screen where prompts
-    // exist. This means that alt screen multiplexers like tmux will not
-    // support this feature. It is just too messy.
-    if (t.screens.active_key != .primary) return;
+    // If cursor-click-to-move is disabled, we don't do any prompt clicking.
+    if (!self.config.cursor_click_to_move) return false;
 
-    // This flag is only set if we've seen at least one semantic prompt
-    // OSC sequence. If we've never seen that sequence, we can't possibly
-    // move the cursor so we can fast path out of here.
-    if (!t.flags.shell_redraws_prompt) return;
+    // If our cursor isn't currently at a prompt then we don't handle
+    // prompt clicks because we can't move if we're not in a prompt!
+    if (!t.cursorIsAtPrompt()) return false;
 
-    // Get our path
-    const from = t.screens.active.cursor.page_pin.*;
-    const path = t.screens.active.promptPath(from, to);
-    log.debug("click-to-move-cursor from={} to={} path={}", .{ from, to, path });
+    // If we have a selection currently, then releasing the mouse
+    // completes the selection and we don't do prompt moving. I don't
+    // love this logic, I think it should be generalized to "if the
+    // mouse release was on a different cell than the mouse press" but
+    // our mouse state at the time of writing this doesn't support that.
+    if (screen.selection != null) return false;
 
-    // If we aren't moving at all, fast path out of here.
-    if (path.x == 0 and path.y == 0) return;
-
-    // Convert our path to arrow key inputs. Yes, that is how this works.
-    // Yes, that is pretty sad. Yes, this could backfire in various ways.
-    // But its the best we can do.
-
-    // We do Y first because it prevents any weird wrap behavior.
-    if (path.y != 0) {
-        const arrow = if (path.y < 0) arrow: {
-            break :arrow if (t.modes.get(.cursor_keys)) "\x1bOA" else "\x1b[A";
-        } else arrow: {
-            break :arrow if (t.modes.get(.cursor_keys)) "\x1bOB" else "\x1b[B";
+    // Get the pin for our mouse click.
+    const pos = try self.rt_surface.getCursorPos();
+    const pos_vp = self.posToViewport(pos.x, pos.y);
+    const click_pin: terminal.Pin = pin: {
+        const pin = screen.pages.pin(.{
+            .viewport = .{
+                .x = pos_vp.x,
+                .y = pos_vp.y,
+            },
+        }) orelse {
+            // See mouseButtonCallback for explanation
+            if (comptime std.debug.runtime_safety) unreachable;
+            return false;
         };
-        for (0..@abs(path.y)) |_| {
-            self.queueIo(.{ .write_stable = arrow }, .locked);
-        }
-    }
-    if (path.x != 0) {
-        const arrow = if (path.x < 0) arrow: {
-            break :arrow if (t.modes.get(.cursor_keys)) "\x1bOD" else "\x1b[D";
-        } else arrow: {
-            break :arrow if (t.modes.get(.cursor_keys)) "\x1bOC" else "\x1b[C";
+
+        break :pin pin;
+    };
+
+    // Get our cursor's most current prompt.
+    const prompt_pin: terminal.Pin = prompt_pin: {
+        var it = screen.cursor.page_pin.promptIterator(
+            .left_up,
+            null,
+        );
+        break :prompt_pin it.next() orelse {
+            // This shouldn't be possible because we asserted we're at
+            // a prompt above, so we MUST find some prompt in a left_up search.
+            log.warn("cursor is at prompt but no prompt found", .{});
+            if (comptime std.debug.runtime_safety) unreachable;
+            return false;
         };
-        for (0..@abs(path.x)) |_| {
-            self.queueIo(.{ .write_stable = arrow }, .locked);
-        }
+    };
+
+    // If our mouse click is before the prompt, we don't move.
+    // We DO ALLOW clicks AFTER the prompt, specifically with Kitty's
+    // click_events=1 since we rely on the shell to validate out of
+    // bounds clicks. This matches Kitty's logic as best I can tell.
+    if (click_pin.before(prompt_pin)) return false;
+
+    // At this point we've established:
+    // - Screen supports prompt clicks
+    // - Cursor is at a prompt
+    // - Click is at or below our prompt
+    switch (screen.semantic_prompt.click) {
+        // Guarded at the start of this function
+        .none => unreachable,
+
+        .click_events => {
+            // For the event, we always send a left-click press event.
+            // This matches what Kitty sends.
+            var data: termio.Message.WriteReq.Small.Array = undefined;
+            const resp = try std.fmt.bufPrint(
+                &data,
+                "\x1B[<0;{d};{d}M",
+                .{ pos_vp.x + 1, pos_vp.y + 1 },
+            );
+
+            // Not that noisy since this only happens on prompt clicks.
+            log.debug(
+                "sending click_events=1 event=ESC{s}",
+                .{resp[1..]},
+            );
+
+            // Ask our IO thread to write the data
+            self.queueIo(.{ .write_small = .{
+                .data = data,
+                .len = @intCast(resp.len),
+            } }, .locked);
+        },
+
+        .cl => {
+            const left_arrow = if (t.modes.get(.cursor_keys)) "\x1bOD" else "\x1b[D";
+            const right_arrow = if (t.modes.get(.cursor_keys)) "\x1bOC" else "\x1b[C";
+
+            const move = screen.promptClickMove(click_pin);
+            for (0..move.left) |_| {
+                self.queueIo(
+                    .{ .write_stable = left_arrow },
+                    .locked,
+                );
+            }
+            for (0..move.right) |_| {
+                self.queueIo(
+                    .{ .write_stable = right_arrow },
+                    .locked,
+                );
+            }
+        },
     }
+
+    return true;
 }
 
 const Link = struct {
@@ -5050,7 +5075,7 @@ pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordin
 ///
 /// Precondition: the render_state mutex must be held.
 fn scrollToBottom(self: *Surface) !void {
-    try self.io.terminal.scrollViewport(.{ .bottom = {} });
+    self.io.terminal.scrollViewport(.{ .bottom = {} });
     try self.queueRender();
 }
 
@@ -5378,20 +5403,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             return false;
         },
 
-        .copy_title_to_clipboard => {
-            const title = self.rt_surface.getTitle() orelse return false;
-            if (title.len == 0) return false;
-
-            self.rt_surface.setClipboard(.standard, &.{.{
-                .mime = "text/plain",
-                .data = title,
-            }}, false) catch |err| {
-                log.err("error copying title to clipboard err={}", .{err});
-                return true;
-            };
-
-            return true;
-        },
+        .copy_title_to_clipboard => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .copy_title_to_clipboard,
+            {},
+        ),
 
         .paste_from_clipboard => return try self.startClipboardRequest(
             .standard,

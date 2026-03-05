@@ -175,8 +175,23 @@ pub const DerivedConfig = struct {
         errdefer arena.deinit();
         const alloc = arena.allocator();
 
+        const palette: terminalpkg.color.Palette = palette: {
+            if (config.@"palette-generate") generate: {
+                if (config.palette.mask.findFirstSet() == null) {
+                    // If the user didn't set any values manually, then
+                    // we're using the default palette and we don't need
+                    // to apply the generation code to it.
+                    break :generate;
+                }
+
+                break :palette terminalpkg.color.generate256Color(config.palette.value, config.palette.mask, config.background.toTerminalRGB(), config.foreground.toTerminalRGB(), config.@"palette-harmonious");
+            }
+
+            break :palette config.palette.value;
+        };
+
         return .{
-            .palette = config.palette.value,
+            .palette = palette,
             .image_storage_limit = config.@"image-storage-limit",
             .cursor_style = config.@"cursor-style",
             .cursor_blink = config.@"cursor-style-blink",
@@ -610,8 +625,9 @@ pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
         // send a FF (0x0C) to the shell so that it can repaint the screen.
         // Mark the current row as a not a prompt so we can properly
         // clear the full screen in the next eraseDisplay call.
-        self.terminal.markSemanticPrompt(.command);
-        assert(!self.terminal.cursorIsAtPrompt());
+        // TODO: fix this
+        // self.terminal.markSemanticPrompt(.command);
+        // assert(!self.terminal.cursorIsAtPrompt());
         self.terminal.eraseDisplay(.complete, false);
     }
 
@@ -620,10 +636,13 @@ pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
 }
 
 /// Scroll the viewport
-pub fn scrollViewport(self: *Termio, scroll: terminalpkg.Terminal.ScrollViewport) !void {
+pub fn scrollViewport(
+    self: *Termio,
+    scroll: terminalpkg.Terminal.ScrollViewport,
+) void {
     self.renderer_state.mutex.lock();
     defer self.renderer_state.mutex.unlock();
-    try self.terminal.scrollViewport(scroll);
+    self.terminal.scrollViewport(scroll);
 }
 
 /// Jump the viewport to the prompt.
@@ -694,7 +713,11 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
     // below but at least users only pay for it if they're using the inspector.
     if (self.renderer_state.inspector) |insp| {
         for (buf, 0..) |byte, i| {
-            insp.recordPtyRead(buf[i .. i + 1]) catch |err| {
+            insp.recordPtyRead(
+                self.alloc,
+                &self.terminal,
+                buf[i .. i + 1],
+            ) catch |err| {
                 log.err("error recording pty read in inspector err={}", .{err});
             };
 

@@ -1,7 +1,9 @@
 //! https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md
 const std = @import("std");
+
 const Parser = @import("../../osc.zig").Parser;
 const OSCCommand = @import("../../osc.zig").Command;
+const string_encoding = @import("../../../os/string_encoding.zig");
 
 const log = std.log.scoped(.osc_semantic_prompt);
 
@@ -40,6 +42,20 @@ pub const Command = struct {
     ) ?option.Type() {
         return option.read(self.options_unvalidated);
     }
+
+    /// Write the decoded command line (if any) to the writer. If an error
+    /// occurs garbage may have been written to the writer.
+    pub fn writeCommandLine(self: Command, writer: *std.Io.Writer) (std.Io.Writer.Error || error{DecodeError})!void {
+        if (self.readOption(.cmdline)) |command_line| {
+            try string_encoding.printfQDecode(writer, command_line);
+            return;
+        }
+        if (self.readOption(.cmdline_url)) |command_line| {
+            try string_encoding.urlPercentDecode(writer, command_line);
+            return;
+        }
+        return;
+    }
 };
 
 pub const Option = enum {
@@ -47,11 +63,12 @@ pub const Option = enum {
     cl,
     prompt_kind,
     err,
+    cmdline,
+    cmdline_url,
+
     // https://sw.kovidgoyal.net/kitty/shell-integration/#notes-for-shell-developers
-    // Kitty supports a "redraw" option for prompt_start. I can't find
-    // this documented anywhere but can see in the code that this is used
-    // by shell environments to tell the terminal that the shell will NOT
-    // redraw the prompt so we should attempt to resize it.
+    // Kitty supports a "redraw" option for prompt_start. This is extended
+    // by Ghostty with the "last" option. See Redraw the type for more details.
     redraw,
 
     // Use a special key instead of arrow keys to move the cursor on
@@ -81,9 +98,11 @@ pub const Option = enum {
             .cl => Click,
             .prompt_kind => PromptKind,
             .err => []const u8,
-            .redraw => bool,
+            .redraw => Redraw,
             .special_key => bool,
             .click_events => bool,
+            .cmdline => []const u8,
+            .cmdline_url => []const u8,
             .exit_code => i32,
         };
     }
@@ -97,6 +116,8 @@ pub const Option = enum {
             .redraw => "redraw",
             .special_key => "special_key",
             .click_events => "click_events",
+            .cmdline => "cmdline",
+            .cmdline_url => "cmdline_url",
 
             // special case, handled before ever calling key
             .exit_code => unreachable,
@@ -166,14 +187,24 @@ pub const Option = enum {
 
             return switch (self) {
                 .aid => value,
-                .cl => std.meta.stringToEnum(Click, value),
+                .cl => .init(value),
                 .prompt_kind => if (value.len == 1) PromptKind.init(value[0]) else null,
                 .err => value,
-                .redraw, .special_key, .click_events => if (value.len == 1) switch (value[0]) {
+                .redraw => if (std.mem.eql(u8, value, "0"))
+                    .false
+                else if (std.mem.eql(u8, value, "1"))
+                    .true
+                else if (std.mem.eql(u8, value, "last"))
+                    .last
+                else
+                    null,
+                .special_key, .click_events => if (value.len == 1) switch (value[0]) {
                     '0' => false,
                     '1' => true,
                     else => null,
                 } else null,
+                .cmdline => value,
+                .cmdline_url => value,
                 // Handled above
                 .exit_code => unreachable,
             };
@@ -184,11 +215,43 @@ pub const Option = enum {
     }
 };
 
+/// The `cl` option specifies what kind of cursor key sequences are handled
+/// by the application for click-to-move-cursor functionality.
 pub const Click = enum {
+    /// Value: "line". Allows motion within a single input line using standard
+    /// left/right arrow escape sequences. Only a single left/right sequence
+    /// should be emitted for double-width characters.
     line,
+
+    /// Value: "m". Allows movement between different lines in the same group,
+    /// but only using left/right arrow escape sequences.
     multiple,
+
+    /// Value: "v". Like `multiple` but cursor up/down should be used. The
+    /// terminal should be conservative when moving between lines: move the
+    /// cursor left to the start of line, emit the needed up/down sequences,
+    /// then move the cursor right to the clicked destination.
     conservative_vertical,
+
+    /// Value: "w". Like `conservative_vertical` but specifies that there are
+    /// no spurious spaces at the end of the line, and the application editor
+    /// handles "smart vertical movement" (moving 2 lines up from position 20,
+    /// where the intermediate line is 15 chars wide and the destination is
+    /// 18 chars wide, ends at position 18).
     smart_vertical,
+
+    pub fn init(value: []const u8) ?Click {
+        return if (value.len == 1) switch (value[0]) {
+            'm' => .multiple,
+            'v' => .conservative_vertical,
+            'w' => .smart_vertical,
+            else => null,
+        } else if (std.mem.eql(
+            u8,
+            value,
+            "line",
+        )) .line else null;
+    }
 };
 
 pub const PromptKind = enum {
@@ -206,6 +269,29 @@ pub const PromptKind = enum {
             else => null,
         };
     }
+};
+
+/// The values for the `redraw` extension to OSC133. This was
+/// started by Kitty[1] and extended by Ghostty (the "last" option).
+///
+/// [1]: https://sw.kovidgoyal.net/kitty/shell-integration/#notes-for-shell-developers
+pub const Redraw = enum(u2) {
+    /// The shell supports redrawing the full prompt and all continuations.
+    /// This is the default value, it does not need to be explicitly set
+    /// unless it is to reset a prior other value.
+    true,
+
+    /// The shell does NOT support redrawing. In this case, Ghostty will NOT
+    /// clear any prompt lines on resize.
+    false,
+
+    /// The shell supports redrawing only the LAST line of the prompt.
+    /// Ghostty will only clear the last line of the prompt on resize.
+    ///
+    /// This is specifically introduced because Bash only redraws the last
+    /// line. It is literally the only shell that does this and it does this
+    /// because its bad and they should feel bad. Don't be like Bash.
+    last,
 };
 
 /// Parse OSC 133, semantic prompts
@@ -327,6 +413,280 @@ test "OSC 133: end_input_start_output with options" {
     try testing.expectEqualStrings("foo", cmd.semantic_prompt.readOption(.aid).?);
 }
 
+test "OSC 133: end_input_start_output with cmdline" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline=echo bobr kurwa";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+
+    try cmd.semantic_prompt.writeCommandLine(&w.writer);
+    try testing.expectEqualStrings("echo bobr kurwa", w.written());
+}
+
+test "OSC 133: end_input_start_output with cmdline 3" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline=echo bobr\\nkurwa";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+
+    try cmd.semantic_prompt.writeCommandLine(&w.writer);
+    try testing.expectEqualStrings("echo bobr\nkurwa", w.written());
+}
+
+test "OSC 133: end_input_start_output with cmdline 4" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline=$'echo bobr kurwa'";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+
+    try cmd.semantic_prompt.writeCommandLine(&w.writer);
+    try testing.expectEqualStrings("echo bobr kurwa", w.written());
+}
+
+test "OSC 133: end_input_start_output with cmdline 5" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline='echo bobr kurwa'";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+
+    try cmd.semantic_prompt.writeCommandLine(&w.writer);
+    try testing.expectEqualStrings("echo bobr kurwa", w.written());
+}
+
+test "OSC 133: end_input_start_output with cmdline 6" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline='echo bobr kurwa";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+    try testing.expectError(error.DecodeError, cmd.semantic_prompt.writeCommandLine(&w.writer));
+}
+
+test "OSC 133: end_input_start_output with cmdline 7" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline=$'echo bobr kurwa";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+
+    try testing.expectError(error.DecodeError, cmd.semantic_prompt.writeCommandLine(&w.writer));
+}
+
+test "OSC 133: end_input_start_output with cmdline 8" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline=$'";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+    try testing.expectError(error.DecodeError, cmd.semantic_prompt.writeCommandLine(&w.writer));
+}
+
+test "OSC 133: end_input_start_output with cmdline 9" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline=";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+
+    try cmd.semantic_prompt.writeCommandLine(&w.writer);
+    try testing.expectEqualStrings("", w.written());
+}
+
+test "OSC 133: end_input_start_output with cmdline_url 1" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline_url=echo bobr kurwa";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+
+    try cmd.semantic_prompt.writeCommandLine(&w.writer);
+    try testing.expectEqualStrings("echo bobr kurwa", w.written());
+}
+
+test "OSC 133: end_input_start_output with cmdline_url 2" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline_url=echo bobr%20kurwa";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+
+    try cmd.semantic_prompt.writeCommandLine(&w.writer);
+    try testing.expectEqualStrings("echo bobr kurwa", w.written());
+}
+
+test "OSC 133: end_input_start_output with cmdline_url 3" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline_url=echo bobr%3bkurwa";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+
+    try cmd.semantic_prompt.writeCommandLine(&w.writer);
+    try testing.expectEqualStrings("echo bobr;kurwa", w.written());
+}
+
+test "OSC 133: end_input_start_output with cmdline_url 4" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline_url=echo bobr%3kurwa";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+    try testing.expectError(error.DecodeError, cmd.semantic_prompt.writeCommandLine(&w.writer));
+}
+
+test "OSC 133: end_input_start_output with cmdline_url 5" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline_url=echo bobr%kurwa";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+    try testing.expectError(error.DecodeError, cmd.semantic_prompt.writeCommandLine(&w.writer));
+}
+
+test "OSC 133: end_input_start_output with cmdline_url 6" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline_url=echo bobr kurwa%20";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+
+    try cmd.semantic_prompt.writeCommandLine(&w.writer);
+    try testing.expectEqualStrings("echo bobr kurwa ", w.written());
+}
+
+test "OSC 133: end_input_start_output with cmdline_url 7" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline_url=echo bobr kurwa%2";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+    try testing.expectError(error.DecodeError, cmd.semantic_prompt.writeCommandLine(&w.writer));
+}
+
+test "OSC 133: end_input_start_output with cmdline_url 8" {
+    const testing = std.testing;
+
+    var w: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer w.deinit();
+
+    var p: Parser = .init(null);
+    const input = "133;C;cmdline_url=echo bobr kurwa%";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .semantic_prompt);
+    try testing.expect(cmd.semantic_prompt.action == .end_input_start_output);
+    try testing.expectError(error.DecodeError, cmd.semantic_prompt.writeCommandLine(&w.writer));
+}
+
 test "OSC 133: fresh_line" {
     const testing = std.testing;
 
@@ -417,12 +777,12 @@ test "OSC 133: fresh_line_new_prompt with cl=line" {
     try testing.expect(cmd.semantic_prompt.readOption(.cl) == .line);
 }
 
-test "OSC 133: fresh_line_new_prompt with cl=multiple" {
+test "OSC 133: fresh_line_new_prompt with cl=m" {
     const testing = std.testing;
 
     var p: Parser = .init(null);
 
-    const input = "133;A;cl=multiple";
+    const input = "133;A;cl=m";
     for (input) |ch| p.next(ch);
 
     const cmd = p.end(null).?.*;
@@ -513,7 +873,7 @@ test "OSC 133: fresh_line_new_prompt with redraw=0" {
     const cmd = p.end(null).?.*;
     try testing.expect(cmd == .semantic_prompt);
     try testing.expect(cmd.semantic_prompt.action == .fresh_line_new_prompt);
-    try testing.expect(cmd.semantic_prompt.readOption(.redraw).? == false);
+    try testing.expect(cmd.semantic_prompt.readOption(.redraw).? == .false);
 }
 
 test "OSC 133: fresh_line_new_prompt with redraw=1" {
@@ -527,7 +887,7 @@ test "OSC 133: fresh_line_new_prompt with redraw=1" {
     const cmd = p.end(null).?.*;
     try testing.expect(cmd == .semantic_prompt);
     try testing.expect(cmd.semantic_prompt.action == .fresh_line_new_prompt);
-    try testing.expect(cmd.semantic_prompt.readOption(.redraw).? == true);
+    try testing.expect(cmd.semantic_prompt.readOption(.redraw).? == .true);
 }
 
 test "OSC 133: fresh_line_new_prompt with invalid redraw" {
@@ -844,9 +1204,9 @@ test "Option.read aid" {
 test "Option.read cl" {
     const testing = std.testing;
     try testing.expect(Option.cl.read("cl=line").? == .line);
-    try testing.expect(Option.cl.read("cl=multiple").? == .multiple);
-    try testing.expect(Option.cl.read("cl=conservative_vertical").? == .conservative_vertical);
-    try testing.expect(Option.cl.read("cl=smart_vertical").? == .smart_vertical);
+    try testing.expect(Option.cl.read("cl=m").? == .multiple);
+    try testing.expect(Option.cl.read("cl=v").? == .conservative_vertical);
+    try testing.expect(Option.cl.read("cl=w").? == .smart_vertical);
     try testing.expect(Option.cl.read("cl=invalid") == null);
     try testing.expect(Option.cl.read("aid=foo") == null);
 }
@@ -870,8 +1230,9 @@ test "Option.read err" {
 
 test "Option.read redraw" {
     const testing = std.testing;
-    try testing.expect(Option.redraw.read("redraw=1").? == true);
-    try testing.expect(Option.redraw.read("redraw=0").? == false);
+    try testing.expect(Option.redraw.read("redraw=1").? == .true);
+    try testing.expect(Option.redraw.read("redraw=0").? == .false);
+    try testing.expect(Option.redraw.read("redraw=last").? == .last);
     try testing.expect(Option.redraw.read("redraw=2") == null);
     try testing.expect(Option.redraw.read("redraw=10") == null);
     try testing.expect(Option.redraw.read("redraw=") == null);
