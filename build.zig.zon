@@ -15,9 +15,9 @@
         },
         .vaxis = .{
             // rockorager/libvaxis
-            // TODO: See https://github.com/rockorager/libvaxis/pull/316
-            .url = "https://github.com/jacobsandlund/libvaxis/archive/72d4c9792f191b556c0388fe8ed65d3dce937b8c.tar.gz",
-            .hash = "vaxis-0.6.0-BWNV_PvSCQBV92ry42nFJwzpV3a5c4fR1qBSxyKW4lei",
+            // TODO: See https://github.com/rockorager/libvaxis/pull/324
+            .url = "https://github.com/jacobsandlund/libvaxis/archive/0582d48b4e0b54c3e6e5b5be3dff6df6ebf775c9.tar.gz",
+            .hash = "vaxis-0.6.0-BWNV_D7TCQBMZVGajzuGrcl8YvhLpOF7D_qHWWSeOPeR",
             .lazy = true,
         },
         .z2d = .{
