@@ -112,10 +112,12 @@ pub fn recordPtyRead(
 /// Render the frame.
 pub fn render(
     self: *Inspector,
+    io: std.Io,
     surface: *Surface,
 ) void {
     // Draw the UI
     self.gui.draw(
+        io,
         surface,
         self.mouse,
     );

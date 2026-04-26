@@ -103,7 +103,7 @@ pub fn init(
         .alloc = alloc,
         .io = io,
         .environ = env,
-        .surfaces = .{},
+        .surfaces = .empty,
         .mailbox = .{},
         .font_grid_set = font_grid_set,
         .config_conditional_state = .{},
@@ -119,7 +119,7 @@ pub fn deinit(self: *App) void {
     // We should have zero items in the grid set at this point because
     // destroy only gets called when the app is shutting down and this
     // should gracefully close all surfaces.
-    assert(self.font_grid_set.count() == 0);
+    assert(self.font_grid_set.count(self.io) == 0);
     self.font_grid_set.deinit();
 }
 

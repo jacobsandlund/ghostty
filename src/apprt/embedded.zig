@@ -491,16 +491,16 @@ pub const Surface = struct {
         if (opts.working_directory) |c_wd| {
             const wd = std.mem.sliceTo(c_wd, 0);
             if (wd.len > 0) wd: {
-                var dir = std.Io.Dir.openDirAbsolute(app.io, wd, .{}) catch |err| {
+                var dir = std.Io.Dir.openDirAbsolute(app.core_app.io, wd, .{}) catch |err| {
                     log.warn(
                         "error opening requested working directory dir={s} err={}",
                         .{ wd, err },
                     );
                     break :wd;
                 };
-                defer dir.close(app.io);
+                defer dir.close(app.core_app.io);
 
-                const stat = dir.stat(app.io) catch |err| {
+                const stat = dir.stat(app.core_app.io) catch |err| {
                     log.warn(
                         "failed to stat requested working directory dir={s} err={}",
                         .{ wd, err },
@@ -517,7 +517,7 @@ pub const Surface = struct {
                 }
 
                 var wd_val: configpkg.WorkingDirectory = .{ .path = wd };
-                if (wd_val.finalize(config.arenaAlloc(), app.io, &global_state.environ_map)) |_| {
+                if (wd_val.finalize(config.arenaAlloc(), app.core_app.io, &global_state.environ_map)) |_| {
                     config.@"working-directory" = wd_val;
                 } else |err| {
                     log.warn(
@@ -1089,7 +1089,7 @@ pub const Inspector = struct {
             render: {
                 const surface = &self.surface.core_surface;
                 const inspector = surface.inspector orelse break :render;
-                inspector.render(surface);
+                inspector.render(io, surface);
             }
 
             // Render
@@ -2129,6 +2129,7 @@ pub const CAPI = struct {
             _ = surface.renderer_thread.mailbox.push(
                 .{ .macos_display_id = display_id },
                 .{ .forever = {} },
+                global_state.io(),
             );
             surface.renderer_thread.wakeup.notify() catch {};
         }
@@ -2150,8 +2151,8 @@ pub const CAPI = struct {
             // read the font face. It should not be deferred since
             // we're loading the primary face.
             const grid = ptr.core_surface.renderer.font_grid;
-            grid.lock.lockShared();
-            defer grid.lock.unlockShared();
+            grid.lock.lockSharedUncancelable(global_state.io());
+            defer grid.lock.unlockShared(global_state.io());
 
             const collection = &grid.resolver.collection;
             const face = collection.getFace(.{}) catch return null;
@@ -2225,8 +2226,8 @@ pub const CAPI = struct {
             descriptor: objc.c.id,
         ) void {
             return ptr.renderMetal(
-                .fromId(command_buffer),
                 global_state.io(),
+                .fromId(command_buffer),
                 .fromId(descriptor),
             ) catch |err| {
                 log.err("error rendering inspector err={}", .{err});

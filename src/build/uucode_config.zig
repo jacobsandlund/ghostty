@@ -37,6 +37,19 @@ pub const tables = [_]config.Table{
         },
     },
     .{
+        // Fields that libvaxis needs that aren't included in the `runtime`
+        // table.
+        .name = "libvaxis_only",
+        .fields = &.{
+            // TODO: Once we're building with zig 0.16 we can see which of
+            // these we need to turn on for Ghostty's libvaxis usage. Or we can
+            // just turn them all on.
+            //"east_asian_width",
+            //"general_category",
+            //"grapheme_break",
+        },
+    },
+    .{
         .name = "buildtime",
         .fields = &.{
             "width",

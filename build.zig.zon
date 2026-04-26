@@ -16,8 +16,8 @@
         .vaxis = .{
             // rockorager/libvaxis
             // TODO: See https://github.com/rockorager/libvaxis/pull/316
-            .url = "https://github.com/rockorager/libvaxis/archive/6dff795b77e930fc9c9a4dc5851faf1d6e703636.tar.gz",
-            .hash = "vaxis-0.6.0-BWNV_EnQCQArQLgoFAs30nhVr6dIHdso3NNXJ9PKcdTH",
+            .url = "https://github.com/jacobsandlund/libvaxis/archive/72d4c9792f191b556c0388fe8ed65d3dce937b8c.tar.gz",
+            .hash = "vaxis-0.6.0-BWNV_PvSCQBV92ry42nFJwzpV3a5c4fR1qBSxyKW4lei",
             .lazy = true,
         },
         .z2d = .{

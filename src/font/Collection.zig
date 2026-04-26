@@ -61,7 +61,7 @@ load_options: ?LoadOptions = null,
 pub fn init() Collection {
     // Initialize our styles array, preallocating some space that is
     // likely to be used.
-    return .{ .faces = .initFill(.{}) };
+    return .{ .faces = .initFill(.empty) };
 }
 
 pub fn deinit(self: *Collection, alloc: Allocator) void {

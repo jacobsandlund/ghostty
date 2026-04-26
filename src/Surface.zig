@@ -523,6 +523,7 @@ pub fn init(
     // Setup our font group. This will reuse an existing font group if
     // it was already loaded.
     const font_grid_key, const font_grid = try app.font_grid_set.ref(
+        app.io,
         &derived_config.font,
         font_size,
     );
@@ -818,7 +819,7 @@ pub fn deinit(self: *Surface) void {
     // We need to deinit AFTER everything is stopped, since there are
     // shared values between the two threads.
     self.renderer_thread.deinit();
-    self.renderer.deinit();
+    self.renderer.deinit(self.app.io);
     self.io_thread.deinit();
     self.io.deinit();
 
@@ -833,7 +834,7 @@ pub fn deinit(self: *Surface) void {
     self.keyboard.table_stack.deinit(self.alloc);
 
     // Clean up our font grid
-    self.app.font_grid_set.deref(self.font_grid_key);
+    self.app.font_grid_set.deref(self.app.io, self.font_grid_key);
 
     // Clean up our render state
     if (self.renderer_state.preedit) |p| self.alloc.free(p.codepoints);
@@ -878,7 +879,7 @@ fn queueIo(
         }
     }
 
-    self.io.queueMessage(msg, mutex);
+    self.io.queueMessage(self.app.io, msg, mutex);
 }
 
 /// Forces the surface to render. This is useful for when the surface
@@ -887,7 +888,7 @@ fn queueIo(
 pub fn draw(self: *Surface) !void {
     // Renderers are required to support `drawFrame` being called from
     // the main thread, so that they can update contents during resize.
-    try self.renderer.drawFrame(true);
+    try self.renderer.drawFrame(self.app.io, true);
 }
 
 /// Activate the inspector. This will begin collecting inspection data.
@@ -2410,10 +2411,11 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
 
     // We need to build up a new font stack for this font size.
     const font_grid_key, const font_grid = try self.app.font_grid_set.ref(
+        self.app.io,
         &self.config.font,
         self.font_size,
     );
-    errdefer self.app.font_grid_set.deref(font_grid_key);
+    errdefer self.app.font_grid_set.deref(self.app.io, font_grid_key);
 
     // Set our cell size
     try self.setCellSize(.{
@@ -4397,7 +4399,7 @@ fn openUrl(
     log.warn("apprt did not handle open URL action, falling back to default opener", .{});
     try internal_os.open(
         self.app.io,
-        self.app.environ,
+        self.app.environ.*,
         action.kind,
         action.url,
     );
@@ -5136,7 +5138,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 // We need to assign directly to self.search because we need
                 // a stable pointer back to the thread state.
                 self.search = .{
-                    .state = try .init(self.alloc, .{
+                    .state = try .init(self.alloc, self.app.io, .{
                         .mutex = self.renderer_state.mutex,
                         .terminal = self.renderer_state.terminal,
                         .event_cb = &searchCallback,

@@ -19,6 +19,43 @@ unicode_tables: UnicodeTables,
 framedata: GhosttyFrameData,
 uucode_tables: std.Build.LazyPath,
 
+/// Singleton uucode module, instantiated once in `init` and reused
+/// everywhere so that ghostty and vaxis share the same compiled tables in
+/// each final binary instead of each linking its own copy.
+///
+/// Sharing one instance is also a hard requirement (not just an
+/// optimization) for Zig 0.16's strict module model. `SharedDeps.add` runs
+/// many times across different (target, optimize) tuples (macos-aarch64,
+/// macos-x86_64, ios-aarch64, Debug + ReleaseFast, etc.), and on each
+/// call we have to wire uucode into both the step's root module and into
+/// vaxis_mod (because vaxis's `Parser.zig` does `@import("uucode")` and
+/// we pass `external_uucode = true` to vaxis's build.zig so vaxis doesn't
+/// instantiate its own uucode dep). If those two import bindings ever
+/// resolve to *different* `*Module` pointers within a single Compile
+/// step's analysis, Zig fails with:
+///
+///     vaxis/src/Parser.zig: file exists in modules 'uucode' and 'uucode0'
+///
+/// because all those uucode module instances share the same physical
+/// `uucode/src/root.zig` file on disk, and Zig requires every file to belong
+/// to exactly one module within a Compile graph.
+///
+/// The natural way to keep them the same would be to call
+/// `b.lazyDependency("uucode", .{ .tables_path, .build_config_path })`
+/// from each call site and let Zig's dependency cache deduplicate
+/// identical args. That fails because of a bug in Zig's
+/// `userLazyPathsAreTheSame` (Build.zig) where the `.src_path` and
+/// `.generated` equality checks are inverted: `if (std.mem.eql(...))
+/// return false` instead of `if (!std.mem.eql(...)) return false`. The
+/// dep cache key therefore always misses whenever any arg is a
+/// `b.path(...)` LazyPath, so each call returns a fresh `*Dependency`
+/// with a fresh `*Module`. Hoisting the dep into one eager
+/// `b.dependency` call here sidesteps the cache entirely.
+///
+/// This conflict is independent of whether vaxis itself is acquired as a
+/// singleton or per-target dep.
+uucode_mod: *std.Build.Module,
+
 /// Used to keep track of a list of file sources.
 pub const LazyPathList = std.ArrayList(std.Build.LazyPath);
 
@@ -31,12 +68,20 @@ pub fn init(b: *std.Build, cfg: *const Config) !SharedDeps {
         break :blk uucode.namedLazyPath("tables.zig");
     };
 
+    // Instantiate the singleton uucode module that both ghostty and vaxis
+    // import. See the doc comment on `uucode_mod`.
+    const uucode_mod = b.dependency("uucode", .{
+        .tables_path = uucode_tables,
+        .build_config_path = b.path("src/build/uucode_config.zig"),
+    }).module("uucode");
+
     var result: SharedDeps = .{
         .config = cfg,
         .help_strings = try .init(b, cfg),
         .unicode_tables = try .init(b, uucode_tables),
         .framedata = try .init(b),
         .uucode_tables = uucode_tables,
+        .uucode_mod = uucode_mod,
 
         // Setup by retarget
         .options = undefined,
@@ -134,6 +179,9 @@ pub fn add(
 
     // Every exe needs the terminal options
     self.config.terminalOptions(.ghostty).add(b, step.root_module);
+
+    // Every exe needs the uucode module
+    step.root_module.addImport("uucode", self.uucode_mod);
 
     // C imports for locale constants and functions
     {
@@ -444,8 +492,14 @@ pub fn add(
         step.root_module.addImport("opengl", dep.module("opengl"));
     }
     if (self.config.vaxis) {
-        if (b.lazyDependency("vaxis", .{})) |dep| {
-            step.root_module.addImport("vaxis", dep.module("vaxis"));
+        if (b.lazyDependency("vaxis", .{
+            .target = target,
+            .optimize = optimize,
+            .external_uucode = true,
+        })) |dep| {
+            const vaxis = dep.module("vaxis");
+            step.root_module.addImport("vaxis", vaxis);
+            vaxis.addImport("uucode", self.uucode_mod);
         }
     }
     if (b.lazyDependency("wuffs", .{
@@ -466,7 +520,6 @@ pub fn add(
     })) |dep| {
         step.root_module.addImport("z2d", dep.module("z2d"));
     }
-    self.addUucode(b, step.root_module, target, optimize);
     if (b.lazyDependency("zf", .{
         .target = target,
         .optimize = optimize,
@@ -957,23 +1010,6 @@ pub fn gtkNgDistResources(
             .generated = resources_h,
         },
     };
-}
-
-pub fn addUucode(
-    self: *const SharedDeps,
-    b: *std.Build,
-    module: *std.Build.Module,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
-) void {
-    if (b.lazyDependency("uucode", .{
-        .target = target,
-        .optimize = optimize,
-        .tables_path = self.uucode_tables,
-        .build_config_path = b.path("src/build/uucode_config.zig"),
-    })) |dep| {
-        module.addImport("uucode", dep.module("uucode"));
-    }
 }
 
 // For dynamic linking, we prefer dynamic linking and to search by

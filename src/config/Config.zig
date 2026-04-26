@@ -3869,9 +3869,11 @@ pub fn default(alloc_gpa: Allocator) Allocator.Error!Config {
 pub fn loadIter(
     self: *Config,
     alloc: Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
     iter: anytype,
 ) !void {
-    try cli.args.parse(Config, alloc, self, iter);
+    try cli.args.parse(Config, alloc, io, env, self, iter);
 }
 
 /// Load configuration from the target config file at `path`.
@@ -3917,7 +3919,7 @@ fn loadReader(self: *Config, alloc: Allocator, io: std.Io, env: *const std.proce
         }
     }
     var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
-    try self.loadIter(alloc, &iter);
+    try self.loadIter(alloc, io, env, &iter);
     try self.expandPaths(io, env, std.Io.Dir.path.dirname(path).?);
 }
 
@@ -4038,7 +4040,7 @@ pub fn loadDefaultFiles(self: *Config, alloc: Allocator, io: std.Io, env: *const
 
     // On macOS load the app support directory as well
     if (comptime builtin.os.tag == .macos) {
-        const legacy_app_support_path = try file_load.legacyDefaultAppSupportPath(alloc, io);
+        const legacy_app_support_path = try file_load.legacyDefaultAppSupportPath(alloc);
         defer alloc.free(legacy_app_support_path);
         const app_support_path = try file_load.preferredAppSupportPath(alloc, io);
         defer alloc.free(app_support_path);
@@ -4177,7 +4179,7 @@ pub fn loadCliArgs(
     // Initialize our CLI iterator.
     var iter = try cli.args.argsIterator(raw_args, alloc_gpa);
     defer iter.deinit();
-    try self.loadIter(alloc_gpa, &iter);
+    try self.loadIter(alloc_gpa, io, env, &iter);
 
     // If we are not loading the default files, then we need to
     // replay the steps up to this point so that we can rebuild
@@ -4195,7 +4197,7 @@ pub fn loadCliArgs(
             env,
             &new_config,
         );
-        try new_config.loadIter(alloc_gpa, &it);
+        try new_config.loadIter(alloc_gpa, io, env, &it);
         self.deinit();
         self.* = new_config;
     }
@@ -4374,7 +4376,7 @@ pub fn changeConditionalState(
 
     // Replay all of our steps to rebuild the configuration
     var it = Replay.iterator(self._replay_steps.items, io, env, &new_config);
-    try new_config.loadIter(alloc_gpa, &it);
+    try new_config.loadIter(alloc_gpa, io, env, &it);
 
     return new_config;
 }
@@ -4487,7 +4489,7 @@ fn loadTheme(
     var file_reader = file.reader(io, &buf);
     const reader = &file_reader.interface;
     var iter: cli.args.LineIterator = .{ .r = reader, .filepath = path };
-    try new_config.loadIter(alloc_gpa, &iter);
+    try new_config.loadIter(alloc_gpa, io, env, &iter);
 
     // Setup our replay to be conditional.
     conditional: for (new_config._replay_steps.items) |*item| {
@@ -4534,7 +4536,7 @@ fn loadTheme(
     // Replay our previous inputs so that we can override values
     // from the theme.
     var slice_it = Replay.iterator(self._replay_steps.items, io, env, &new_config);
-    try new_config.loadIter(alloc_gpa, &slice_it);
+    try new_config.loadIter(alloc_gpa, io, env, &slice_it);
 
     // Success, swap our new config in and free the old.
     self.deinit();

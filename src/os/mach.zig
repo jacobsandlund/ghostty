@@ -92,11 +92,18 @@ const TaggedPageAllocator = struct {
             aligned_len
         else
             mem.alignForward(usize, aligned_len + max_drop_len, page_size);
-        const hint = @atomicLoad(@TypeOf(std.heap.next_mmap_addr_hint), &std.heap.next_mmap_addr_hint, .unordered);
+        // We pass null as the address hint and let the kernel pick. The
+        // upstream `PageAllocator` maintains a `next_mmap_addr_hint` to
+        // encourage contiguous allocations, but in Zig 0.16 that field
+        // was made private (renamed to `addr_hint` inside
+        // `lib/std/heap/PageAllocator.zig`). If we want similar behavior
+        // here we'd need to maintain our own thread-safe hint atomically,
+        // mirroring the upstream logic.
+        // See thread: https://ampcode.com/threads/T-019dca3f-5eb7-757a-9b2c-bc7eac1a6f2b
         const slice = std.posix.mmap(
-            hint,
+            null,
             overalloc_len,
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .READ = true, .WRITE = true },
             .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
             tag.make(),
             0,
@@ -109,8 +116,6 @@ const TaggedPageAllocator = struct {
         if (drop_len != 0) std.posix.munmap(slice[0..drop_len]);
         const remaining_len = overalloc_len - drop_len;
         if (remaining_len > aligned_len) std.posix.munmap(@alignCast(result_ptr[aligned_len..remaining_len]));
-        const new_hint: [*]align(std.heap.page_size_min) u8 = @alignCast(result_ptr + aligned_len);
-        _ = @cmpxchgStrong(@TypeOf(std.heap.next_mmap_addr_hint), &std.heap.next_mmap_addr_hint, hint, new_hint, .monotonic, .monotonic);
         return result_ptr;
     }
 

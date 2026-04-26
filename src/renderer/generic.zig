@@ -797,12 +797,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             return result;
         }
 
-        pub fn deinit(self: *Self) void {
+        pub fn deinit(self: *Self, io: std.Io) void {
             if (self.overlay) |*overlay| overlay.deinit(self.alloc);
             self.terminal_state.deinit(self.alloc);
             if (self.search_selected_match) |*m| m.arena.deinit();
             if (self.search_matches) |*m| m.arena.deinit();
-            self.swap_chain.deinit();
+            self.swap_chain.deinit(io);
 
             if (DisplayLink != void) {
                 if (self.display_link) |display_link| {

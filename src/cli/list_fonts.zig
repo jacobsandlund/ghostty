@@ -62,21 +62,23 @@ pub const Options = struct {
 pub fn run(
     alloc: Allocator,
     io: std.Io,
+    env: *const std.process.Environ.Map,
     proc_args: std.process.Args,
 ) !u8 {
     var iter = try args.argsIterator(proc_args, alloc);
     defer iter.deinit();
-    return try runArgs(alloc, io, &iter);
+    return try runArgs(alloc, io, env, &iter);
 }
 
 fn runArgs(
     alloc_gpa: Allocator,
     io: std.Io,
+    env: *const std.process.Environ.Map,
     argsIter: anytype,
 ) !u8 {
     var config: Options = .{};
     defer config.deinit();
-    try args.parse(Options, alloc_gpa, &config, argsIter);
+    try args.parse(Options, alloc_gpa, io, env, &config, argsIter);
 
     // Use an arena for all our memory allocs
     var arena = ArenaAllocator.init(alloc_gpa);
